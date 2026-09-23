@@ -96,19 +96,30 @@ final class LocalWhisper: @unchecked Sendable {
     private var context: UnsafeMutableRawPointer?
     private var vadPath = ""
 
+    func unload() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                lt_whisper_close(self.context)
+                self.context = nil
+                self.vadPath = ""
+                continuation.resume()
+            }
+        }
+    }
+
     func prepare(model: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
                 self.vadPath = model.deletingLastPathComponent().appendingPathComponent("ggml-silero-v6.2.0.bin").path
                 guard FileManager.default.fileExists(atPath: self.vadPath) else {
                     continuation.resume(throwing: NSError(domain: "Whisper", code: 3,
-                        userInfo: [NSLocalizedDescriptionKey: "缺少本地人声检测模型，请重新构建应用。 "]))
+                        userInfo: [NSLocalizedDescriptionKey: "缺少本地人声检测模型，请在 App 中重新下载模型。"]))
                     return
                 }
                 if self.context == nil { self.context = lt_whisper_open(model.path) }
                 if self.context != nil { continuation.resume() }
                 else { continuation.resume(throwing: NSError(domain: "Whisper", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "无法加载 Whisper 模型，请重新运行构建脚本。"])) }
+                    userInfo: [NSLocalizedDescriptionKey: "无法加载 Whisper 模型，请检查模型下载状态后重试。"])) }
             }
         }
     }

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import Combine
 
 enum AppSheet: String, Identifiable {
     case history, name
@@ -36,6 +37,8 @@ final class AppModel: ObservableObject {
     }
     private let preferences: UserDefaults
     let engineLabel = "Whisper large-v3-turbo · 长上下文 · AI 修订"
+    let modelDownloads = ModelDownloads()
+    private var modelDownloadChanges: AnyCancellable?
 
     private let audio = AudioCapture()
     private let whisper = LocalWhisper()
@@ -49,12 +52,15 @@ final class AppModel: ObservableObject {
     private var audioQueue: [AudioPhrase] = []
     private var recognizing = false
     private var translationTask: Task<Void, Never>?
+    private var translator: DeepSeek?
     private var waiting: [UUID] = []
+    private var pendingWrites = 0
     private var quitting = false
     private var observers: [NSObjectProtocol] = []
 
     init(preferences: UserDefaults = .standard) {
         self.preferences = preferences
+        modelDownloadChanges = modelDownloads.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         if preferences.object(forKey: "overlayFontSize") != nil {
             overlayFontSize = min(44, max(16, preferences.double(forKey: "overlayFontSize")))
         }
@@ -96,8 +102,27 @@ final class AppModel: ObservableObject {
         } catch { problem = error.localizedDescription }
     }
 
+    var canManageModels: Bool { !recording && !preparing && pendingCount == 0 && !modelDownloads.busy }
+
+    func changeModelDirectory(_ directory: URL) async {
+        guard canManageModels else { return }
+        preparing = true
+        defer { preparing = false }
+        await whisper.unload()
+        await modelDownloads.move(to: directory)
+    }
+
+    func removeModels() async {
+        guard canManageModels else { return }
+        preparing = true
+        defer { preparing = false }
+        await whisper.unload()
+        await modelDownloads.remove()
+    }
+
     func start() async {
         guard !recording, !preparing, pendingCount == 0, sheet != .name else { return }
+        guard let model = modelDownloads.modelURL else { problem = "请先下载并校验本地识别模型。"; return }
         problem = nil
         preparing = true
         defer { preparing = false }
@@ -112,16 +137,13 @@ final class AppModel: ObservableObject {
             if defaultDirectory == nil { chooseDefaultDirectory() }
             guard let parent = defaultDirectory else { return }
             status = "正在加载本地 Whisper 模型…"
-            guard let model = Bundle.main.url(forResource: "ggml-large-v3-turbo", withExtension: "bin") else {
-                problem = "应用内缺少模型，请重新运行 build.sh。"
-                return
-            }
             try await whisper.prepare(model: model)
             store = try SessionStore(parent: parent)
             directory = store!.directory
             captions = []
             audioQueue = []
             waiting = []
+            translator = DeepSeek(key: key)
             sessionID = UUID()
             let thisSession = sessionID
             audio.onPhrase = { [weak self] phrase in
@@ -289,10 +311,20 @@ final class AppModel: ObservableObject {
         let lower = max(0, index - 2)
         let targets = Array(captions[lower...index]).filter { !$0.rawEnglish.isEmpty }
         let history = Array(captions[max(0, lower - 6)..<lower])
-        let translator = DeepSeek(key: key)
+        if translator?.key != key { translator = DeepSeek(key: key) }
+        let translator = translator!
         translationTask = Task {
             do {
-                let results = try await translator.revise(targets: targets, history: history)
+                let results = try await translator.revise(targets: targets, history: history) { result in
+                    guard !self.quitting, let current = self.captions.firstIndex(where: { $0.id == result.id }),
+                          self.captions[current].apply(result, complete: false) else { return }
+                    if self.captions[current].firstTokenLatency == nil {
+                        self.captions[current].firstTokenLatency = max(0,
+                            ProcessInfo.processInfo.systemUptime - self.startUptime - self.captions[current].end)
+                    }
+                    self.persist(self.captions[current])
+                    self.scrollVersion += 1
+                }
                 guard !quitting else { return }
                 for result in results {
                     guard let current = captions.firstIndex(where: { $0.id == result.id }),
@@ -306,10 +338,14 @@ final class AppModel: ObservableObject {
                 scrollVersion += 1
             } catch {
                 // Mark only the requested current revision, never a newer draft.
-                if !quitting, let current = captions.firstIndex(where: { $0.id == id }),
-                   captions[current].revision == targets.last?.revision {
-                    captions[current].status = "failed"
-                    persist(captions[current])
+                if !quitting {
+                    for target in targets {
+                        guard let current = captions.firstIndex(where: { $0.id == target.id }),
+                              captions[current].revision == target.revision,
+                              target.id == id || captions[current].status == "pending" else { continue }
+                        captions[current].status = "failed"
+                        persist(captions[current])
+                    }
                     problem = "AI 修订失败：\(error.localizedDescription)。录音和英文已保留。"
                 }
             }
@@ -321,15 +357,23 @@ final class AppModel: ObservableObject {
     }
 
     private func persist(_ row: Caption) {
-        do { try store?.save(row) }
-        catch {
-            if recording { stop() }
-            problem = "文字保存失败，已停止收音：\(error.localizedDescription)"
+        guard let store else { return }
+        pendingWrites += 1
+        store.enqueue(row) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.pendingWrites -= 1
+                if case .failure(let error) = result {
+                    if self.recording { self.stop() }
+                    self.problem = "文字保存失败，已停止收音：\(error.localizedDescription)"
+                }
+                self.refreshPending()
+            }
         }
     }
 
     private func refreshPending() {
-        pendingCount = audioQueue.count + (recognizing ? 1 : 0) + waiting.count + (translationTask == nil ? 0 : 1)
+        pendingCount = audioQueue.count + (recognizing ? 1 : 0) + waiting.count + (translationTask == nil ? 0 : 1) + pendingWrites
         if !recording && !preparing && pendingCount == 0 && directory != nil {
             status = "本次录音和字幕已保存。"
         }
@@ -344,6 +388,7 @@ final class AppModel: ObservableObject {
             captions[index].status = "failed"
             persist(captions[index])
         }
+        store?.flush()
     }
 
     func chooseDefaultDirectory() {

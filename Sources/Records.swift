@@ -26,12 +26,12 @@ struct Caption: Codable, Identifiable {
 
     // Requests may complete after the audio has advanced. Never overwrite it.
     @discardableResult
-    mutating func apply(_ correction: CaptionCorrection) -> Bool {
+    mutating func apply(_ correction: CaptionCorrection, complete: Bool = true) -> Bool {
         guard id == correction.id, revision == correction.revision else { return false }
         english = RecognitionText.removingLoops(correction.english)
         chinese = correction.chinese
         uncertain = correction.uncertain || english != correction.english || RecognitionText.removingLoops(rawEnglish) != rawEnglish
-        status = "done"
+        status = complete ? "done" : "pending"
         return true
     }
 }
@@ -42,11 +42,15 @@ func srtTime(_ seconds: Double) -> String {
                   ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
 }
 
-final class SessionStore {
+// All journal, export and metadata mutations are confined to io.
+final class SessionStore: @unchecked Sendable {
     let directory: URL
-    private(set) var captions: [Caption] = []
+    private let io = DispatchQueue(label: "local.live-translate.records", qos: .utility)
+    private var storedCaptions: [Caption] = []
     private var journal: FileHandle?
-    private(set) var metadata = RecordingMetadata(title: "", createdAt: Date())
+    private var storedMetadata = RecordingMetadata(title: "", createdAt: Date())
+    var captions: [Caption] { io.sync { storedCaptions } }
+    var metadata: RecordingMetadata { io.sync { storedMetadata } }
 
     init(parent: URL) throws {
         let formatter = DateFormatter()
@@ -58,42 +62,58 @@ final class SessionStore {
             throw CocoaError(.fileWriteUnknown)
         }
         journal = try FileHandle(forWritingTo: url)
-        metadata.title = RecordingMetadata.defaultTitle(at: metadata.createdAt)
+        storedMetadata.title = RecordingMetadata.defaultTitle(at: storedMetadata.createdAt)
         try saveMetadata()
         try export()
     }
 
     func finish(duration: Double) throws {
-        metadata.endedAt = Date()
-        metadata.duration = duration
-        try saveMetadata()
+        try io.sync {
+            storedMetadata.endedAt = Date()
+            storedMetadata.duration = duration
+            try saveMetadata()
+        }
     }
 
     func name(_ title: String) throws {
-        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        metadata.title = value.isEmpty ? RecordingMetadata.defaultTitle(at: metadata.createdAt) : value
-        try saveMetadata()
+        try io.sync {
+            let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            storedMetadata.title = value.isEmpty ? RecordingMetadata.defaultTitle(at: storedMetadata.createdAt) : value
+            try saveMetadata()
+        }
     }
 
     private func saveMetadata() throws {
-        try JSONEncoder().encode(metadata).write(to: directory.appendingPathComponent("session.json"), options: .atomic)
+        try JSONEncoder().encode(storedMetadata).write(to: directory.appendingPathComponent("session.json"), options: .atomic)
     }
 
-    func save(_ caption: Caption) throws {
+    // Synchronous access is used by tests and final flushes, not the subtitle UI.
+    func save(_ caption: Caption) throws { try io.sync { try write(caption) } }
+
+    func enqueue(_ caption: Caption, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        io.async {
+            do { try self.write(caption); completion(.success(())) }
+            catch { completion(.failure(error)) }
+        }
+    }
+
+    func flush() { io.sync {} }
+
+    private func write(_ caption: Caption) throws {
         var line = try JSONEncoder().encode(caption)
         line.append(0x0a)
         try journal?.write(contentsOf: line)
         try journal?.synchronize()
-        if let index = captions.firstIndex(where: { $0.id == caption.id }) {
-            captions[index] = caption
+        if let index = storedCaptions.firstIndex(where: { $0.id == caption.id }) {
+            storedCaptions[index] = caption
         } else {
-            captions.append(caption)
+            storedCaptions.append(caption)
         }
         try export()
     }
 
     private func export() throws {
-        let rows = captions.sorted { $0.start < $1.start }
+        let rows = storedCaptions.sorted { $0.start < $1.start }
         let english = rows.map { "[\(srtTime($0.start))] \($0.english)" }.joined(separator: "\n")
         let raw = rows.map { "[\(srtTime($0.start))] \($0.rawEnglish.isEmpty ? $0.english : $0.rawEnglish)" }.joined(separator: "\n")
         let chinese = rows.map { "[\(srtTime($0.start))] \(displayTranslation($0))" }.joined(separator: "\n")
@@ -207,16 +227,41 @@ struct CorrectionResponse: Codable {
     }
 }
 
-struct DeepSeek {
+@MainActor
+final class DeepSeek {
     let key: String
-    func revise(targets: [Caption], history: [Caption]) async throws -> [CaptionCorrection] {
+    private let session: URLSession
+    private var cache = CorrectionCache()
+    private static let sharedSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
+
+    init(key: String, session: URLSession? = nil) {
+        self.key = key
+        self.session = session ?? Self.sharedSession
+    }
+
+    static func input(targets: [Caption], history: [Caption], includeRevisions: Bool = true) throws -> Data {
         let payload: [String: Any] = [
             "history": history.map { ["english": $0.english, "chinese": $0.chinese] },
-            "targets": targets.map { ["id": $0.id.uuidString, "revision": $0.revision,
+            "targets": targets.map { ["id": $0.id.uuidString, "revision": includeRevisions ? $0.revision : 0,
                 "rawEnglish": RecognitionText.removingLoops($0.rawEnglish), "english": $0.english,
                 "chinese": $0.chinese, "audioComplete": $0.isFinal] as [String: Any] }
         ]
-        let input = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        return try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+    }
+
+    func revise(targets: [Caption], history: [Caption],
+                onRow: (CaptionCorrection) -> Void = { _ in }) async throws -> [CaptionCorrection] {
+        try Task.checkCancellation()
+        let fingerprint = try Self.input(targets: targets, history: history, includeRevisions: false)
+        if let cached = cache.response(for: fingerprint, targets: targets) {
+            cached.forEach(onRow)
+            return cached
+        }
+        let input = String(decoding: try Self.input(targets: targets, history: history), as: UTF8.self)
         var request = URLRequest(url: URL(string: "https://api.deepseek.com/chat/completions")!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
@@ -237,25 +282,24 @@ struct DeepSeek {
                 ["role": "user", "content": input]
             ]
         ])
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 30
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TranslationError.server }
         guard http.statusCode == 200 else { throw TranslationError.http(http.statusCode) }
-        var result = ""
+        var stream = CorrectionStream(targets: targets)
         var complete = false
         for try await line in bytes.lines {
             try Task.checkCancellation()
             switch try StreamEvent.parse(line) {
-            case .text(let text): result += text
+            case .text(let text): try stream.append(text).forEach(onRow)
             case .finished: complete = true
             case .ignored: break
             }
             if complete { break }
         }
         guard complete else { throw TranslationError.incomplete }
-        return try CorrectionResponse.parse(result, targets: targets)
+        let result = try stream.finish()
+        try Task.checkCancellation()
+        cache.insert(result, for: fingerprint)
+        return result
     }
 }

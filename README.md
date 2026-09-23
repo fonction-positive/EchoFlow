@@ -6,7 +6,7 @@ Mac 麦克风 → 本地 Whisper 英语识别 → DeepSeek 上下文校对翻译
 
 ## 使用
 
-1. 双击 `build/EchoFlow.app`。
+1. 解压 Release 并将 `EchoFlow.app` 拖到「应用程序」，或运行本机构建的 `build/EchoFlow.app`。首次使用点击「下载识别模型」，查看下载进度；支持取消和失败后重试。下载并通过校验后才能开始录音。
 2. 展开「DeepSeek API 密钥」，输入自己的密钥并保存。密钥存入 macOS 钥匙串，不写入项目和录音文件。系统询问钥匙串访问时，核对应用名称后由你授权。
 3. 点击「开始录音」，首次使用允许麦克风访问，尚未设置默认目录时会提示选择，之后直接保存到默认目录。
 4. 等待模型加载完成、界面显示「录音中」后开始说英语。「悬浮字幕」可重新打开字幕窗；拖动背景移动、拖动边缘调整大小。
@@ -18,7 +18,9 @@ Mac 麦克风 → 本地 Whisper 英语识别 → DeepSeek 上下文校对翻译
 
 字幕窗可跨桌面显示，并配置为支持全屏应用的辅助窗口；具体全屏行为仍需在目标应用里验证。关闭主窗口不会停止正在进行的录音，点击 Dock 图标可重新打开。退出应用时，如果仍在录音或处理，会先提示。
 
-首次构建已下载并内置约 1.5 GiB 的 `large-v3-turbo` 模型。以后打开应用不需要再次下载。音频只在本机处理，当前英文和最近的中英字幕上下文通过 HTTPS 发送到 DeepSeek；翻译需要网络和 API 余额。当前模型是 `deepseek-flash`，显式关闭思考模式并开启流式输出。
+Release 和构建产物不包含模型。App 从官方 Hugging Face 仓库下载 `large-v3-turbo` 和 Silero VAD，共约 1.63 GB，逐个验证大小与 SHA-256。模型默认保存在 `~/Library/Application Support/EchoFlow/Models/`，升级 App 时保留；打开 App 时检查模型完整性。「模型管理」显示保存路径和实际占用，支持在 Finder 中显示、移除模型，以及更改目录。更改目录会先复制并校验已有模型，成功切换后再清理旧副本；失败保留原目录，不覆盖目标目录的同名无效文件。录音和后台字幕处理期间不能迁移或移除模型。取消或失败不启用未完成的模型，重试会保留并跳过已校验的完整模型。音频只在本机处理，当前英文和最近的中英字幕上下文通过 HTTPS 发送到 DeepSeek；翻译需要网络和 API 余额。当前模型是 `deepseek-flash`，显式关闭思考模式并开启流式输出。
+
+删除 App 不会自动删除独立保存的模型。卸载前可在「模型管理」点击「移除模型」，或通过显示的路径手动清理。此操作只移除识别模型，不删除录音、字幕或目录中的其他文件。
 
 ## 保存内容
 
@@ -42,8 +44,10 @@ Mac 麦克风 → 本地 Whisper 英语识别 → DeepSeek 上下文校对翻译
 - 更完整的音频会重新识别并替换同一条字幕；Whisper 保留前两段可信原文提示，以及最长 28 秒的音频上下文。Silero VAD 在推理前选取人声（含 200 ms 前后余量），无检测到的人声时不生成字幕。
 - 构建脚本对固定版本 whisper.cpp 应用 `Patches/whisper-1.8.3-validation.patch`：将短句循环纳入候选验收，触发温度回退；最后一次重试也必须通过检查，失败不能落入正常输出。跨解码片段的异常重复还会在返回前检查。失败显示 `[未识别清楚]`，不调用翻译、不成为下一段提示，之后的音频版本仍可重新识别。
 - 重复判据是保守的异常检测，不是正确率保证。真实的长句反复强调也可能被标为不可靠；普通短促强调和数字变化有回归检查。人声检测在轻声或强噪声环境仍可能漏检。原始录音始终完整保存，已通过验收的识别原文仍保留在 `english-raw.txt` 和 `events.jsonl`。
-- DeepSeek 一次校对当前片段和前两段，并参考更早最多六段。JSON 流完整返回并校验后一起更新英文和中文，避免显示未完成 JSON。过期版本的回复会被丢弃；排队的同段识别只保留最新版本。
-- `events.jsonl` 的 `firstTokenLatency` 为兼容旧格式保留字段名，本版表示从当时音频末端到初版完整中文应用到字幕的耗时，不再是网络首 token 的时间。
+- DeepSeek 一次校对当前片段和前两段，并参考更早最多六段。每条完整 JSON 字幕通过 ID、版本号和内容校验后立即显示，整批完成后确认；截断、重复 ID 或格式错误会标记失败并保留已显示的文字。过期版本不能覆盖新识别。
+- 翻译复用网络会话。仅在原文、已有校订、上下文和音频完成状态均未变化时复用结果，更新版本号；输入改变会重新请求。缓存最多保留 32 组结果。
+- 字幕日志和 TXT/SRT 导出在独立串行队列执行；每条日志仍同步落盘，退出前排空保存队列。音频每 5 秒的恢复保护保持不变。
+- `events.jsonl` 的 `firstTokenLatency` 为兼容旧格式保留字段名，本版表示从当时音频末端到该条初版完整中文显示的耗时，不再等待同批其他字幕，也不是网络首 token 的时间。
 - 2～3 秒仍是目标而非保证。较长音频用于后续修订，不要求等待 28 秒才显示字幕；停顿、网络和模型负载都会影响实际延迟。含个人录音内容的对比和诊断记录只保存在本地 `research/`，不上传仓库。
 - 录音期间抑制系统自动闲置睡眠；合盖或主动休眠仍可能打断处理。收到休眠／音频设备变化通知时会结束录音并提示重新开始。
 - 录音期间会持续写入内部原始音频，并每 5 秒强制同步到磁盘和更新恢复信息。异常退出后，下次打开应用或选择该默认目录时会自动生成 `audio.wav`；正常停止时原始恢复文件会在 WAV 成功生成后立即删除。恢复点之后接近 5 秒的数据可能尚未来得及落盘。
@@ -51,7 +55,7 @@ Mac 麦克风 → 本地 Whisper 英语识别 → DeepSeek 上下文校对翻译
 
 ## 重新构建和测试
 
-需要 Xcode Command Line Tools（含 Swift、Clang）及 CMake。首次构建需要访问 GitHub 和 Hugging Face；脚本只向本项目目录写入依赖和模型。
+需要 Xcode Command Line Tools（含 Swift、Clang）及 CMake。首次构建需要访问 GitHub 下载 whisper.cpp；构建过程不下载识别模型，依赖只写入项目目录。
 
 ```sh
 ./build.sh
@@ -63,13 +67,26 @@ Mac 麦克风 → 本地 Whisper 英语识别 → DeepSeek 上下文校对翻译
 
 `--whisper` 使用引擎自带的英语示例文件验证真实本地推理和静音输出，不读取麦克风、不调用 DeepSeek。运行环境需要允许访问 Metal GPU；受限沙箱可能阻止 GPU 内存分配。
 
-重新编译会改变 ad-hoc 签名，系统可能再次询问麦克风或钥匙串权限。应用尚未进行 Developer ID 签名和苹果公证，定位是本机编译自用，不是对外分发的安装包。
+重新编译会改变 ad-hoc 签名，系统可能再次询问麦克风或钥匙串权限。应用尚未进行 Developer ID 签名和苹果公证，下载的发布包可能被 Gatekeeper 拦截；确认来源后，可按 macOS「系统设置 → 隐私与安全性」中的提示允许打开。
 
 ## 技术来源
 
 - [whisper.cpp v1.8.3](https://github.com/ggml-org/whisper.cpp/tree/v1.8.3)，MIT 许可证，构建时随应用附带。
-- [Whisper large-v3-turbo 模型](https://huggingface.co/ggerganov/whisper.cpp)，脚本验证项目公布的 SHA-1。
-- [Silero VAD](https://github.com/snakers4/silero-vad)，MIT 许可证；内置约 0.9 MB 人声检测模型，构建时验证 SHA-256。
+- [Whisper large-v3-turbo 模型](https://huggingface.co/ggerganov/whisper.cpp)，App 下载后验证大小与 SHA-256。
+- [Silero VAD](https://github.com/snakers4/silero-vad)，MIT 许可证；约 0.9 MB 人声检测模型随 App 内的模型下载一起获取并验证 SHA-256。
 - [DeepSeek 官方 API](https://api-docs.deepseek.com/)、[思考模式开关](https://api-docs.deepseek.com/guides/thinking_mode/)。
 
 当前系统的 Apple 英语识别检测返回没有可用本机资源，因此按用户确认采用 Whisper，不依赖 Apple Speech。
+
+## 发布包与回归检查
+
+发布 ZIP 只包含 App 可执行文件、图标和第三方许可证，不包含模型、API 密钥或录音。构建仍使用 ad-hoc 签名，尚未进行 Apple 公证。
+
+基础检查无需网络。真实识别回放使用本机 `models/` 中的模型；可从 App 模型目录复制或链接用于开发测试。下列可选测试仅发送合成文本或下载公开模型：
+
+```sh
+./test.sh --translation-smoke     # 使用本地 api.env 中的密钥，仅发送三句合成测试文字
+./test.sh --model-download-smoke  # 使用实际 App 下载流程获取并校验公开的 VAD 模型
+```
+
+`Tests/download_server.py` 是仅用于开发测试的本机 HTTP 文件服务器，不随 App 分发；可用 Python 3 启动后，将其打印的 URL 传给 `./test.sh --download-checks URL`，验证进度、取消、重试、损坏文件与 HTTP 错误。App 本身不依赖 Python。

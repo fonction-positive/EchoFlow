@@ -31,7 +31,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model, model.recording || model.pendingCount > 0 else { return .terminateNow }
+        guard let model else { return .terminateNow }
+        if !model.recording && model.pendingCount == 0 {
+            if model.modelDownloads.downloading || model.modelDownloads.managing || model.preparing {
+                model.modelDownloads.cancel()
+                Task { @MainActor in
+                    await model.modelDownloads.waitForDownload()
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+                return .terminateLater
+            }
+            return .terminateNow
+        }
         let alert = NSAlert()
         alert.messageText = "结束本次录音并退出？"
         alert.informativeText = "已保存的录音和文字会保留。尚未完成的翻译将标记为失败。"
@@ -78,7 +89,7 @@ struct MainView: View {
                         .padding(.horizontal, 12).padding(.vertical, 5)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.preparing || (!model.recording && model.pendingCount > 0))
+                .disabled(model.preparing || (!model.recording && (model.pendingCount > 0 || !model.modelDownloads.ready)))
                 if model.recording {
                     Button {
                         model.togglePause()
@@ -94,6 +105,8 @@ struct MainView: View {
             }
 
             RecordingStatusView(status: model.status, problem: model.problem, pendingCount: model.pendingCount)
+
+            ModelDownloadView(model: model, downloads: model.modelDownloads)
 
             TranscriptView(model: model, dark: false)
                 .background(.background, in: RoundedRectangle(cornerRadius: 14))
@@ -121,11 +134,65 @@ struct MainView: View {
         }
         .padding(26).frame(minWidth: 680, minHeight: 570)
         .background(Color(nsColor: .windowBackgroundColor))
+        .task { await model.modelDownloads.inspect() }
         .sheet(item: $model.sheet) { sheet in
             switch sheet {
             case .history: HistoryView(model: model)
             case .name: RecordingNameView(model: model)
             }
+        }
+    }
+}
+
+struct ModelDownloadView: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var downloads: ModelDownloads
+    @State private var expanded = false
+    @State private var confirmingRemoval = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(downloads.message, systemImage: downloads.ready ? "checkmark.circle" : "arrow.down.circle")
+                    .font(.caption).textSelection(.enabled)
+                Spacer()
+                if downloads.downloading {
+                    Button("取消下载") { downloads.cancel() }
+                } else if !downloads.ready && !downloads.busy {
+                    Button("下载识别模型") { downloads.start() }.disabled(!model.canManageModels)
+                }
+            }
+            if downloads.downloading { ProgressView(value: downloads.progress) }
+            DisclosureGroup("模型管理 · 已占用 \(downloads.occupiedSize)", isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(downloads.directory.path).font(.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("更改目录…") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = false
+                            panel.canChooseDirectories = true
+                            panel.canCreateDirectories = true
+                            panel.allowsMultipleSelection = false
+                            panel.message = "选择模型保存目录。已有模型会迁移，校验成功后清理旧副本。"
+                            panel.directoryURL = downloads.directory
+                            guard panel.runModal() == .OK, let target = panel.url else { return }
+                            Task { await model.changeModelDirectory(target) }
+                        }.disabled(!model.canManageModels)
+                        Button("在 Finder 中显示") {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: downloads.directory.path)
+                        }.disabled(!FileManager.default.fileExists(atPath: downloads.directory.path))
+                        Button("移除模型…") { confirmingRemoval = true }
+                            .disabled(!model.canManageModels || downloads.occupiedBytes == 0)
+                    }
+                    Text("下载来源：官方 Hugging Face 仓库。卸载 App 前可在此移除模型；录音和字幕单独保存。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+            }.font(.caption)
+        }
+        .alert("移除已下载的识别模型？", isPresented: $confirmingRemoval) {
+            Button("取消", role: .cancel) {}
+            Button("移除模型", role: .destructive) { Task { await model.removeModels() } }
+        } message: {
+            Text("将释放 \(downloads.occupiedSize) 空间。录音和字幕不受影响；下次识别需要重新下载模型。")
         }
     }
 }

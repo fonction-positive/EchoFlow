@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
-mkdir -p .build/vendor models build
+mkdir -p .build/vendor build
 vendor="$PWD/.build/vendor/whisper.cpp-1.8.3"
 if [ ! -f "$vendor/include/whisper.h" ]; then
     curl -fL --retry 2 https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.8.3.tar.gz -o .build/vendor/whisper.tar.gz
@@ -13,16 +13,6 @@ if patch --batch --forward --dry-run --silent -d "$vendor" -p1 < Patches/whisper
 else
     patch --batch --dry-run --silent -R -d "$vendor" -p1 < Patches/whisper-1.8.3-validation.patch
 fi
-if [ ! -f models/ggml-silero-v6.2.0.bin ]; then
-    curl -fL --retry 2 https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin -o models/ggml-silero-v6.2.0.bin.download
-    mv models/ggml-silero-v6.2.0.bin.download models/ggml-silero-v6.2.0.bin
-fi
-printf '%s  %s\n' 2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987 models/ggml-silero-v6.2.0.bin | shasum -a 256 -c -
-if [ ! -f models/ggml-large-v3-turbo.bin ]; then
-    curl -fL --retry 2 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin -o models/ggml-large-v3-turbo.bin.download
-    mv models/ggml-large-v3-turbo.bin.download models/ggml-large-v3-turbo.bin
-fi
-printf '%s  %s\n' 4af2b29d7ec73d781377bfd1758ca957a807e941 models/ggml-large-v3-turbo.bin | shasum -c -
 cmake -S "$vendor" -B .build/whisper -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=OFF \
     -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_BLAS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
@@ -34,8 +24,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp Resources/Silero-VAD-LICENSE.txt "$app/Contents/Resources/"
-cp models/ggml-large-v3-turbo.bin "$app/Contents/Resources/"
-cp models/ggml-silero-v6.2.0.bin "$app/Contents/Resources/"
+# Remove model resources left by older builds; models now live in Application Support.
+rm -f "$app/Contents/Resources/ggml-large-v3-turbo.bin" "$app/Contents/Resources/ggml-silero-v6.2.0.bin"
 cp "$vendor/LICENSE" "$app/Contents/Resources/Whisper-LICENSE.txt"
 libraries=()
 while IFS= read -r path; do libraries+=("$path"); done < <(find .build/whisper -name '*.a' -type f)

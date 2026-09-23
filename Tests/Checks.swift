@@ -18,6 +18,13 @@ struct Checks {
                 start: Double(CommandLine.arguments[index + 2])!, end: Double(CommandLine.arguments[index + 3])!)
             return
         }
+        try await StreamingChecks.run()
+        try await ModelDownloadChecks.storage()
+        if let index = CommandLine.arguments.firstIndex(of: "--download-checks"), CommandLine.arguments.count > index + 1 {
+            try await ModelDownloadChecks.run(server: URL(string: CommandLine.arguments[index + 1])!)
+        }
+        if CommandLine.arguments.contains("--model-download-smoke") { try await ModelDownloadChecks.officialSmoke() }
+        if CommandLine.arguments.contains("--translation-smoke") { try await StreamingChecks.liveSmoke() }
         let statusView = NSHostingView(rootView: RecordingStatusView(status: "正在收音", problem: nil, pendingCount: 0))
         statusView.frame.size.width = 600
         let idleHeight = statusView.fittingSize.height
@@ -228,7 +235,8 @@ struct Checks {
 
         if CommandLine.arguments.contains("--whisper") {
             let engine = LocalWhisper()
-            try await engine.prepare(model: URL(fileURLWithPath: "models/ggml-large-v3-turbo.bin"))
+            let modelURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ECHOFLOW_TEST_MODEL"] ?? "models/ggml-large-v3-turbo.bin")
+            try await engine.prepare(model: modelURL)
             let file = try AVAudioFile(forReading: URL(fileURLWithPath: ".build/vendor/whisper.cpp-1.8.3/samples/jfk.wav"))
             let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
             try file.read(into: buffer)
@@ -242,6 +250,11 @@ struct Checks {
             let silent = try await engine.transcribe(Array(repeating: 0, count: 16_000))
             check(silent.isEmpty)
             print("PASS: silence does not produce subtitles")
+            await engine.unload()
+            try await engine.prepare(model: modelURL)
+            let reloaded = try await engine.transcribe(samples)
+            check(reloaded.lowercased().contains("country"))
+            print("PASS: unload and reload model after storage management")
         }
     }
 }
