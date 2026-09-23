@@ -1,0 +1,14 @@
+build/
+.build/
+.DS_Store
+*.wav
+*.caf
+*.aiff
+.env
+api.env
+models/
+*.env
+.env.*
+*.pcm
+LiveTranslate_*/
+research/

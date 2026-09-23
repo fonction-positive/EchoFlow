@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ground" x1="92" y1="72" x2="932" y2="970" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#287CFF"/>
+      <stop offset=".48" stop-color="#1457D7"/>
+      <stop offset="1" stop-color="#092D82"/>
+    </linearGradient>
+    <linearGradient id="bubble" x1="245" y1="260" x2="800" y2="814" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#CAE4FF"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="24"/>
+      <feOffset dy="26"/>
+      <feComponentTransfer><feFuncA type="linear" slope=".24"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="210" fill="url(#ground)"/>
+  <path d="M104 300C152 158 284 112 443 112h252c126 0 212 58 257 160C920 160 825 112 696 112H443C284 112 152 158 104 300Z" fill="#6DA8FF" opacity=".42"/>
+  <g filter="url(#shadow)">
+    <path d="M226 320c0-55 45-100 100-100h266c55 0 100 45 100 100v160c0 55-45 100-100 100H450l-99 82c-23 19-57 3-57-27v-55c-40-13-68-50-68-100V320Z" fill="url(#bubble)"/>
+    <path d="M390 488h259c55 0 100 45 100 100v115c0 55-45 100-100 100H536l-81 68c-23 19-57 3-57-27v-44c-53-4-95-48-95-101V588c0-45 30-83 72-96" fill="#0B3FA7"/>
+  </g>
+  <path d="M330 448 396 309c7-15 28-15 35 0l67 139" fill="none" stroke="#1457D7" stroke-linecap="round" stroke-linejoin="round" stroke-width="34"/>
+  <path d="M356 400h116" fill="none" stroke="#1457D7" stroke-linecap="round" stroke-width="30"/>
+  <path d="M442 618v84m-49-50h98m-74 50h50" fill="none" stroke="#FFF" stroke-linecap="round" stroke-linejoin="round" stroke-width="30"/>
+  <g fill="#77B1FF">
+    <rect x="550" y="634" width="30" height="52" rx="15"/>
+    <rect x="598" y="605" width="30" height="110" rx="15"/>
+    <rect x="646" y="624" width="30" height="72" rx="15"/>
+  </g>
+</svg>
