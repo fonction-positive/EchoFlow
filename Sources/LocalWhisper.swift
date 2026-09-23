@@ -1,5 +1,7 @@
 import Foundation
 
+enum RecognitionError: Error { case unreliable }
+
 struct AudioPhrase {
     let id: UUID
     let revision: Int
@@ -92,10 +94,17 @@ struct AudioSegmenter {
 final class LocalWhisper: @unchecked Sendable {
     private let queue = DispatchQueue(label: "local.live-translate.whisper", qos: .userInitiated)
     private var context: UnsafeMutableRawPointer?
+    private var vadPath = ""
 
     func prepare(model: URL) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
+                self.vadPath = model.deletingLastPathComponent().appendingPathComponent("ggml-silero-v6.2.0.bin").path
+                guard FileManager.default.fileExists(atPath: self.vadPath) else {
+                    continuation.resume(throwing: NSError(domain: "Whisper", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: "缺少本地人声检测模型，请重新构建应用。 "]))
+                    return
+                }
                 if self.context == nil { self.context = lt_whisper_open(model.path) }
                 if self.context != nil { continuation.resume() }
                 else { continuation.resume(throwing: NSError(domain: "Whisper", code: 1,
@@ -116,9 +125,11 @@ final class LocalWhisper: @unchecked Sendable {
                 }
                 // Whisper expects at least a second of audio for short utterances.
                 let padded = samples.count < 16_000 ? samples + Array(repeating: Float(0), count: 16_000 - samples.count) : samples
+                var status: Int32 = 0
                 let result = padded.withUnsafeBufferPointer {
-                    lt_whisper_transcribe(context, $0.baseAddress, Int32($0.count), prompt)
+                    lt_whisper_transcribe(context, $0.baseAddress, Int32($0.count), prompt, self.vadPath, &status)
                 }
+                if status == -100 { continuation.resume(throwing: RecognitionError.unreliable); return }
                 guard let result else {
                     continuation.resume(throwing: NSError(domain: "Whisper", code: 2,
                         userInfo: [NSLocalizedDescriptionKey: "本地语音识别失败，原始录音仍已保存。"]))

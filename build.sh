@@ -7,6 +7,17 @@ if [ ! -f "$vendor/include/whisper.h" ]; then
     curl -fL --retry 2 https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v1.8.3.tar.gz -o .build/vendor/whisper.tar.gz
     tar -xzf .build/vendor/whisper.tar.gz -C .build/vendor
 fi
+cp Sources/DecoderValidation.h "$vendor/src/DecoderValidation.h"
+if patch --batch --forward --dry-run --silent -d "$vendor" -p1 < Patches/whisper-1.8.3-validation.patch; then
+    patch --batch --forward --silent -d "$vendor" -p1 < Patches/whisper-1.8.3-validation.patch
+else
+    patch --batch --dry-run --silent -R -d "$vendor" -p1 < Patches/whisper-1.8.3-validation.patch
+fi
+if [ ! -f models/ggml-silero-v6.2.0.bin ]; then
+    curl -fL --retry 2 https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin -o models/ggml-silero-v6.2.0.bin.download
+    mv models/ggml-silero-v6.2.0.bin.download models/ggml-silero-v6.2.0.bin
+fi
+printf '%s  %s\n' 2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987 models/ggml-silero-v6.2.0.bin | shasum -a 256 -c -
 if [ ! -f models/ggml-large-v3-turbo.bin ]; then
     curl -fL --retry 2 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin -o models/ggml-large-v3-turbo.bin.download
     mv models/ggml-large-v3-turbo.bin.download models/ggml-large-v3-turbo.bin
@@ -22,7 +33,9 @@ app="${LIVE_TRANSLATE_APP:-$PWD/build/EchoFlow.app}"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp Resources/Silero-VAD-LICENSE.txt "$app/Contents/Resources/"
 cp models/ggml-large-v3-turbo.bin "$app/Contents/Resources/"
+cp models/ggml-silero-v6.2.0.bin "$app/Contents/Resources/"
 cp "$vendor/LICENSE" "$app/Contents/Resources/Whisper-LICENSE.txt"
 libraries=()
 while IFS= read -r path; do libraries+=("$path"); done < <(find .build/whisper -name '*.a' -type f)

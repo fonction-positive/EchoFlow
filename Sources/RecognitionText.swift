@@ -5,7 +5,7 @@ enum RecognitionText {
         // Reject an entire contaminated source, rather than turning its loop into a prompt.
         let recent = rows.filter { $0.id != id && $0.isFinal }.suffix(2)
         return String(recent.map(\.rawEnglish)
-            .filter { removingLoops($0) == $0 }
+            .filter { !$0.isEmpty && !lt_repetition_candidate($0) }
             .joined(separator: " ").suffix(800))
     }
 

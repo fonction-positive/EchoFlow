@@ -255,6 +255,21 @@ final class AppModel: ObservableObject {
                     scrollVersion += 1
                     translateNext()
                 }
+            } catch RecognitionError.unreliable {
+                let index: Int
+                if let existing = captions.firstIndex(where: { $0.id == phrase.id }) { index = existing }
+                else {
+                    captions.append(Caption(id: phrase.id, start: phrase.start, end: phrase.end, english: ""))
+                    index = captions.count - 1
+                }
+                captions[index].recognize(phrase, english: "")
+                captions[index].english = "[Unclear speech]"
+                captions[index].chinese = "[未识别清楚]"
+                captions[index].uncertain = true
+                captions[index].status = "done"
+                waiting.removeAll { $0 == phrase.id }
+                persist(captions[index])
+                scrollVersion += 1
             } catch { problem = error.localizedDescription }
             recognizing = false
             liveEnglish = ""

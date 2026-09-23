@@ -13,6 +13,11 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String = "",
 @main
 struct Checks {
     @MainActor static func main() async throws {
+        if let index = CommandLine.arguments.firstIndex(of: "--recognition-replay"), CommandLine.arguments.count > index + 3 {
+            try await RecognitionReplay.run(file: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+                start: Double(CommandLine.arguments[index + 2])!, end: Double(CommandLine.arguments[index + 3])!)
+            return
+        }
         let statusView = NSHostingView(rootView: RecordingStatusView(status: "正在收音", problem: nil, pendingCount: 0))
         statusView.frame.size.width = 600
         let idleHeight = statusView.fittingSize.height
@@ -58,6 +63,15 @@ struct Checks {
         contaminatedContext.rawEnglish = loop
         contaminatedContext.isFinal = true
         let nextID = UUID()
+        var shortLoopContext = goodContext
+        shortLoopContext.rawEnglish = String(repeating: "I will show you the details. ", count: 3)
+        check(RecognitionText.context(from: [goodContext, shortLoopContext], excluding: nextID) == goodContext.rawEnglish,
+              "Three-sentence decoder loops must not become the next audio prompt")
+        check(lt_repetition_candidate("I'm sorry. I'm sorry. I'm sorry."))
+        check(lt_repetition_candidate("This side. This side? This side."))
+        check(lt_repetition_candidate("I will show you the details. I will show you the details."))
+        check(!lt_repetition_candidate("No, no, no. Turn left, then turn left again."))
+        check(!lt_repetition_candidate("The result is 128 bytes. The result is 256 bytes. The result is 512 bytes."))
         check(RecognitionText.context(from: [goodContext, contaminatedContext], excluding: nextID) == goodContext.rawEnglish,
               "Keep valid terminology but exclude the entire looping source")
         check(RecognitionText.context(from: [goodContext], excluding: goodContext.id).isEmpty,

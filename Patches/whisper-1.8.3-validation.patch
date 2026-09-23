@@ -1,0 +1,65 @@
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -1,4 +1,5 @@
+ #include "whisper.h"
++#include "DecoderValidation.h"
+ #include "whisper-arch.h"
+ 
+ #include "ggml.h"
+@@ -7030,6 +7031,7 @@
+         }
+ 
+         int best_decoder_id = 0;
++        bool accepted = false;
+ 
+         for (int it = 0; it < (int) temperatures.size(); ++it) {
+             const float t_cur = temperatures[it];
+@@ -7524,6 +7526,16 @@
+                     WHISPER_LOG_DEBUG("%s: decoder %2d: score = %8.5f, result_len = %3d, avg_logprobs = %8.5f, entropy = %8.5f\n",
+                             __func__, j, decoder.sequence.score, decoder.sequence.result_len, decoder.sequence.avg_logprobs, decoder.sequence.entropy);
+ 
++                    std::string candidate_text;
++                    for (const auto & token : decoder.sequence.tokens) {
++                        if (token.id < whisper_token_eot(ctx)) candidate_text += ctx->vocab.id_to_token.at(token.id);
++                    }
++                    if (echoflow_repetition_candidate(candidate_text)) {
++                        WHISPER_LOG_DEBUG("%s: failed due to EchoFlow repetition validation\n", __func__);
++                        decoder.failed = true;
++                        continue;
++                    }
++
+                     if (decoder.sequence.result_len > 32 && decoder.sequence.entropy < params.entropy_thold) {
+                         WHISPER_LOG_DEBUG("%s: decoder %2d: failed due to entropy %8.5f < %8.5f\n",
+                                 __func__, j, decoder.sequence.entropy, params.entropy_thold);
+@@ -7546,9 +7558,8 @@
+             bool success = true;
+ 
+             // was the decoding successful for the current temperature?
+-            // do fallback only if:
+-            // - we are not at the last temperature
+-            if (it != (int) temperatures.size() - 1) {
++            // The final attempt must pass the same checks as every earlier one.
++            {
+                 const auto & decoder = state->decoders[best_decoder_id];
+ 
+                 if (decoder.failed ||
+@@ -7560,6 +7571,7 @@
+             }
+ 
+             if (success) {
++                accepted = true;
+                 //for (auto & token : ctx->decoders[best_decoder_id].sequence.tokens) {
+                 //    WHISPER_LOG_DEBUG("%s: token = %d, p = %6.3f, pt = %6.3f, ts = %s, str = %s\n", __func__, token.id, token.p, token.pt, ctx->vocab.id_to_token.at(token.tid).c_str(), ctx->vocab.id_to_token.at(token.id).c_str());
+                 //}
+@@ -7568,6 +7580,11 @@
+             }
+ 
+             WHISPER_LOG_DEBUG("\n%s: failed to decode with temperature = %.2f\n", __func__, t_cur);
++        }
++
++        if (!accepted) {
++            state->result_all.clear();
++            return -100; // No trustworthy candidate; caller must not publish a transcript.
+         }
+ 
+         // output results through a user-provided callback
